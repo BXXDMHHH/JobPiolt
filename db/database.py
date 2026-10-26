@@ -1,7 +1,8 @@
 """SQLite 数据访问层。掌握连接、参数化 SQL、commit 和查询结果转换，就能完成本地工具的数据持久化。"""
 from pathlib import Path
 import sqlite3
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
@@ -9,12 +10,21 @@ DB_PATH = DATA_DIR / "jobpilot.db"
 JOB_STATUSES = ["待投递", "准备中", "待确认", "已投递", "待沟通", "面试", "已拒绝", "已录用", "已撤回", "投递失败"]
 
 
-def get_connection() -> sqlite3.Connection:
+@contextmanager
+def get_connection() -> Iterator[sqlite3.Connection]:
+    """提供自动提交/回滚并关闭连接的数据库上下文。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
