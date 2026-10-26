@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local database and user data
+data/*.db
+data/*.sqlite*
+resumes/*
+!resumes/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Secrets and local settings
+.env
+.streamlit/secrets.toml
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
