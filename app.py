@@ -9,8 +9,10 @@ ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from db.database import JOB_STATUSES, init_db, list_jobs, get_job, create_job, update_job, update_job_status, list_application_events, import_jobs, count_jobs
+from db.database import JOB_STATUSES, init_db, list_jobs, get_job, create_job, update_job, update_job_status, list_application_events, import_jobs, count_jobs, create_resume_version, list_resume_versions
 from services.matching_service import score_job
+from services.resume_service import store_resume, resolve_resume_path
+from services import boss_browser
 
 st.set_page_config(page_title="JobPilot 求职助手", page_icon="🎯", layout="wide")
 init_db()
@@ -31,7 +33,7 @@ c2.metric("待投递", sum(j["status"] == "待投递" for j in jobs))
 c3.metric("已投递", sum(j["status"] == "已投递" for j in jobs))
 c4.metric("面试中", sum(j["status"] == "面试" for j in jobs))
 
-tab_jobs, tab_import, tab_status, tab_history = st.tabs(["岗位管理", "CSV 批量导入/导出", "投递状态", "投递历史"])
+tab_jobs, tab_import, tab_status, tab_history = st.tabs(["岗位管理", "CSV 批量导入/导出", "投递状态", "投递历史", "简历版本", "BOSS 岗位读取"])
 
 with tab_jobs:
     st.subheader("新增岗位")
@@ -163,6 +165,96 @@ with tab_history:
         st.download_button("导出历史 CSV", history_df.to_csv(index=False).encode("utf-8-sig"), "jobpilot_application_history.csv", "text/csv")
     else:
         st.info("暂无历史记录。创建岗位和修改状态后，历史会自动记录。")
+
+
+with tab_resume:
+    st.subheader("简历版本管理")
+    st.caption("文件保存在本机 resumes/，不会上传到 GitHub 或外部服务。支持 PDF、DOC、DOCX、TXT，单份最大 15 MB。")
+    with st.form("resume_upload_form", clear_on_submit=True):
+        resume_file = st.file_uploader("选择简历文件", type=["pdf", "doc", "docx", "txt"])
+        resume_name = st.text_input("版本名称", placeholder="例如：软件测试开发-校招版")
+        resume_role = st.text_input("目标岗位", placeholder="例如：软件测试开发")
+        resume_notes = st.text_area("版本备注", placeholder="例如：突出 Python、SQL、自动化测试项目")
+        resume_submit = st.form_submit_button("保存简历版本", type="primary")
+        if resume_submit:
+            if resume_file is None:
+                st.error("请先选择简历文件。")
+            elif not resume_name.strip():
+                st.error("请填写版本名称，方便后续区分。")
+            else:
+                try:
+                    stored = store_resume(resume_file.name, resume_file.getvalue())
+                    resume_id = create_resume_version(
+                        display_name=resume_name, target_role=resume_role, notes=resume_notes,
+                        stored_filename=stored["stored_filename"], sha256=stored["sha256"],
+                    )
+                    st.success(f"已保存简历版本 #{resume_id}。文件保存在本地。")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+    resumes = list_resume_versions()
+    if resumes:
+        resume_df = pd.DataFrame([{
+            "版本 ID": r["id"], "版本名称": r["display_name"], "目标岗位": r["target_role"],
+            "备注": r["notes"], "文件名": r["stored_filename"], "SHA-256": r["sha256"][:16] + "…",
+            "创建时间": r["created_at"],
+        } for r in resumes])
+        st.dataframe(resume_df, use_container_width=True, hide_index=True)
+        resume_options = {f"#{r['id']} · {r['display_name']} · {r['target_role'] or '未指定目标'}": r for r in resumes}
+        selected_resume = st.selectbox("选择要下载的简历版本", list(resume_options.keys()))
+        resume_record = resume_options[selected_resume]
+        try:
+            resume_path = resolve_resume_path(resume_record["stored_filename"])
+            if resume_path.exists():
+                st.download_button("下载此版本", resume_path.read_bytes(), resume_path.name, mime="application/octet-stream")
+            else:
+                st.warning("数据库记录存在，但本地简历文件未找到。")
+        except ValueError as exc:
+            st.error(str(exc))
+    else:
+        st.info("还没有简历版本。先上传一份简历，之后可以为不同目标岗位保留不同版本。")
+
+with tab_boss:
+    st.subheader("BOSS 直聘岗位读取（实验功能）")
+    st.caption("此功能只读取你在 JobPilot 专用浏览器中当前打开的页面。请手动登录、手动浏览；不会自动投递或处理验证码。")
+    boss_url = st.text_input("启动时打开的 BOSS 页面", value=boss_browser.DEFAULT_URL, key="boss_start_url")
+    b1, b2 = st.columns(2)
+    if b1.button("启动 BOSS 专用浏览器", type="primary"):
+        try:
+            message = boss_browser.launch_browser(boss_url.strip() or boss_browser.DEFAULT_URL)
+            st.success(message)
+        except Exception as exc:
+            st.error(f"浏览器启动失败：{exc}")
+    if b2.button("读取当前 BOSS 页面"):
+        try:
+            st.session_state["boss_page_data"] = boss_browser.read_current_page()
+            st.success("页面读取完成。请检查并修正下方字段，再保存岗位。")
+        except Exception as exc:
+            st.error(str(exc))
+    page_data = st.session_state.get("boss_page_data")
+    if page_data:
+        st.text_input("网页标题", value=page_data.get("title", ""), disabled=True)
+        st.text_input("当前网址", value=page_data.get("url", ""), disabled=True)
+        st.text_area("页面描述", value=page_data.get("description", ""), height=70, disabled=True)
+        st.text_area("页面可见文本（用于核对）", value=page_data.get("text", ""), height=220, disabled=True)
+        with st.form("save_boss_job_form"):
+            default_title = page_data.get("title", "").replace(" - BOSS直聘", "").replace("_BOSS直聘", "").strip()
+            boss_title = st.text_input("岗位名称（请核对）", value=default_title[:150])
+            boss_company = st.text_input("公司名称（请手动核对）")
+            boss_city = st.text_input("工作城市")
+            boss_salary = st.text_input("薪资范围")
+            boss_jd = st.text_area("岗位描述（从页面文本复制后可在此编辑）", value=page_data.get("description", ""), height=120)
+            if st.form_submit_button("保存到岗位库", type="primary"):
+                if not boss_title.strip() or not boss_company.strip():
+                    st.error("岗位名称和公司名称必填。请先核对页面内容。")
+                else:
+                    try:
+                        create_job(title=boss_title, company=boss_company, city=boss_city, salary=boss_salary,
+                                   url=page_data.get("url", ""), jd=boss_jd, status="待投递")
+                        st.success("岗位已保存到 JobPilot。")
+                        st.rerun()
+                    except ValueError as exc:
+                        st.warning(str(exc))
 
 st.divider()
 st.caption("本地数据库默认保存在 data/jobpilot.db。不要把个人简历、账号密码、浏览器 Cookie 或真实个人信息提交到公开仓库。")
