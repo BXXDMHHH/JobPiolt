@@ -33,7 +33,7 @@ c2.metric("待投递", sum(j["status"] == "待投递" for j in jobs))
 c3.metric("已投递", sum(j["status"] == "已投递" for j in jobs))
 c4.metric("面试中", sum(j["status"] == "面试" for j in jobs))
 
-tab_jobs, tab_import, tab_status, tab_history = st.tabs(["岗位管理", "CSV 批量导入/导出", "投递状态", "投递历史", "简历版本", "BOSS 岗位读取"])
+tab_jobs, tab_import, tab_status, tab_history, tab_resume, tab_boss = st.tabs(["岗位管理", "CSV 批量导入/导出", "投递状态", "投递历史", "简历版本", "BOSS 岗位读取"])
 
 with tab_jobs:
     st.subheader("新增岗位")
