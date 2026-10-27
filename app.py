@@ -11,6 +11,9 @@ if str(ROOT_DIR) not in sys.path:
 
 from db.database import JOB_STATUSES, init_db, list_jobs, get_job, create_job, update_job, update_job_status, list_application_events, import_jobs, count_jobs, create_resume_version, list_resume_versions
 from services.matching_service import score_job
+from services.job_extraction import extract_job_fields
+from services.resume_matching import match_resume_to_job
+from services.application_verification import RESULT_TYPES, record_application_check, list_application_checks
 from services.resume_service import store_resume, resolve_resume_path
 from services import boss_browser
 
@@ -33,7 +36,7 @@ c2.metric("待投递", sum(j["status"] == "待投递" for j in jobs))
 c3.metric("已投递", sum(j["status"] == "已投递" for j in jobs))
 c4.metric("面试中", sum(j["status"] == "面试" for j in jobs))
 
-tab_jobs, tab_import, tab_status, tab_history, tab_resume, tab_boss = st.tabs(["岗位管理", "CSV 批量导入/导出", "投递状态", "投递历史", "简历版本", "BOSS 岗位读取"])
+tab_jobs, tab_import, tab_status, tab_history, tab_resume, tab_boss, tab_match = st.tabs(["岗位管理", "CSV 批量导入/导出", "投递状态", "投递历史", "简历版本", "BOSS 岗位读取", "简历匹配"])
 
 with tab_jobs:
     st.subheader("新增岗位")
@@ -228,33 +231,113 @@ with tab_boss:
     if b2.button("读取当前 BOSS 页面"):
         try:
             st.session_state["boss_page_data"] = boss_browser.read_current_page()
-            st.success("页面读取完成。请检查并修正下方字段，再保存岗位。")
+            st.session_state["boss_extracted"] = extract_job_fields(st.session_state["boss_page_data"])
+            st.success("页面读取完成。以下字段为自动识别建议，请逐项核对。")
         except Exception as exc:
             st.error(str(exc))
     page_data = st.session_state.get("boss_page_data")
+    extracted = st.session_state.get("boss_extracted", {})
     if page_data:
         st.text_input("网页标题", value=page_data.get("title", ""), disabled=True)
         st.text_input("当前网址", value=page_data.get("url", ""), disabled=True)
-        st.text_area("页面描述", value=page_data.get("description", ""), height=70, disabled=True)
-        st.text_area("页面可见文本（用于核对）", value=page_data.get("text", ""), height=220, disabled=True)
+        st.text_area("页面可见文本（用于核对）", value=page_data.get("text", ""), height=180, disabled=True)
         with st.form("save_boss_job_form"):
-            default_title = page_data.get("title", "").replace(" - BOSS直聘", "").replace("_BOSS直聘", "").strip()
-            boss_title = st.text_input("岗位名称（请核对）", value=default_title[:150])
-            boss_company = st.text_input("公司名称（请手动核对）")
-            boss_city = st.text_input("工作城市")
-            boss_salary = st.text_input("薪资范围")
-            boss_jd = st.text_area("岗位描述（从页面文本复制后可在此编辑）", value=page_data.get("text", "")[:12000], height=180)
-            if st.form_submit_button("保存到岗位库", type="primary"):
+            st.caption("字段识别基于本地规则，置信度不是准确率保证。请检查所有字段。")
+            confidence = extracted.get("confidence", {})
+            st.caption("识别提示：" + "；".join(f"{k}：{v}" for k, v in confidence.items()))
+            boss_title = st.text_input("岗位名称", value=str(extracted.get("title", "")))
+            boss_company = st.text_input("公司名称", value=str(extracted.get("company", "")))
+            boss_city = st.text_input("工作城市", value=str(extracted.get("city", "")))
+            boss_salary = st.text_input("薪资范围", value=str(extracted.get("salary", "")))
+            boss_skills = st.text_input("识别到的技能", value="、".join(extracted.get("skills", [])))
+            boss_jd = st.text_area("岗位描述 / 页面文本", value=str(extracted.get("jd", "")), height=160)
+            if st.form_submit_button("核对并保存到岗位库", type="primary"):
                 if not boss_title.strip() or not boss_company.strip():
-                    st.error("岗位名称和公司名称必填。请先核对页面内容。")
+                    st.error("岗位名称和公司名称必填，请核对页面后填写。")
                 else:
                     try:
                         create_job(title=boss_title, company=boss_company, city=boss_city, salary=boss_salary,
                                    url=page_data.get("url", ""), jd=boss_jd, status="待投递")
-                        st.success("岗位已保存到 JobPilot。")
+                        st.success("岗位已保存到岗位库。")
                         st.rerun()
                     except ValueError as exc:
                         st.warning(str(exc))
 
+        st.divider()
+        st.subheader("表单辅助填写（不会提交）")
+        st.caption("仅检查当前页面可见的普通输入框。请勿填写密码、验证码或敏感身份信息。填写操作需由你逐项勾选，并且不会点击提交按钮。")
+        if st.button("检查当前页面可填写字段"):
+            try:
+                st.session_state["boss_form_fields"] = boss_browser.inspect_visible_form_fields()
+            except Exception as exc:
+                st.error(str(exc))
+        form_fields = st.session_state.get("boss_form_fields", [])
+        if form_fields:
+            field_values = {}
+            for field in form_fields:
+                label = field.get("label") or f"{field.get('tag')} #{field.get('index')}"
+                if field.get("tag") == "select":
+                    st.caption(f"跳过下拉框：{label}")
+                    continue
+                if not label.strip():
+                    label = f"未命名输入框 #{field.get('index')}"
+                use_field = st.checkbox(f"填写 {label}（当前值：{field.get('value') or '空'}）", key=f"boss_fill_{field['index']}")
+                if use_field:
+                    field_values[field["index"]] = st.text_input(f"为「{label}」填写内容", key=f"boss_fill_value_{field['index']}")
+            if st.button("确认填写已勾选字段", type="primary"):
+                try:
+                    result = boss_browser.fill_visible_fields(field_values)
+                    st.success(f"已填写 {result['filled']} 个字段。未提交任何申请，请回到浏览器检查。")
+                except Exception as exc:
+                    st.error(str(exc))
+
+        st.divider()
+        st.subheader("投递结果核实")
+        st.caption("完成页面操作后，回来记录页面上真实看到的结果。单击按钮本身不算成功证据。")
+        verify_jobs = list_jobs()
+        if verify_jobs:
+            verify_options = {f"#{j['id']} · {j['company']} · {j['title']}": j for j in verify_jobs}
+            verify_choice = st.selectbox("选择要核实的岗位", list(verify_options.keys()), key="boss_verify_job")
+            verify_job = verify_options[verify_choice]
+            verify_result = st.selectbox("核实结论", RESULT_TYPES, key="boss_verify_result")
+            verify_evidence = st.text_area("页面证据 / 备注", placeholder="例如：页面明确显示“已投递”；若仍不确定，选择待核实。", key="boss_verify_evidence")
+            verify_url = st.text_input("证据页面 URL", value=page_data.get("url", ""), key="boss_verify_url")
+            if st.button("保存核实记录", key="save_application_check"):
+                try:
+                    check_id = record_application_check(verify_job["id"], verify_result, verify_evidence, verify_url)
+                    st.success(f"已保存核实记录 #{check_id}。")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        checks = list_application_checks()
+        if checks:
+            st.dataframe(pd.DataFrame([{"时间": c["created_at"], "岗位": c["job_title"], "公司": c["company"],
+                                        "结论": c["result"], "证据": c["evidence"], "页面": c["page_url"]} for c in checks]),
+                         use_container_width=True, hide_index=True)
+
 st.divider()
 st.caption("本地数据库默认保存在 data/jobpilot.db。不要把个人简历、账号密码、浏览器 Cookie 或真实个人信息提交到公开仓库。")
+
+
+with tab_match:
+    st.subheader("岗位与简历版本匹配")
+    st.caption("评分只使用岗位信息、简历版本名称、目标岗位和备注；不会读取简历文件正文，也不代表录用概率。")
+    match_jobs = list_jobs()
+    match_resumes = list_resume_versions()
+    if not match_jobs:
+        st.info("请先导入或保存岗位。")
+    elif not match_resumes:
+        st.info("请先在“简历版本”页面上传至少一个版本。")
+    else:
+        job_options = {f"#{j['id']} · {j['company']} · {j['title']} · {j['city']}": j for j in match_jobs}
+        match_job_label = st.selectbox("选择目标岗位", list(job_options.keys()), key="match_job_select")
+        match_job = job_options[match_job_label]
+        match_keywords = st.text_input("重点技能关键词（逗号分隔）", value=keywords_text, key="match_keywords")
+        match_result = match_resume_to_job(match_job, match_resumes, target_role=target_role,
+                                           keywords=[x.strip() for x in match_keywords.split(",") if x.strip()])
+        if match_result:
+            st.dataframe(pd.DataFrame([{"排名": i + 1, "简历版本": r["display_name"], "目标岗位": r["target_role"],
+                                        "匹配分": r["score"], "推荐理由": r["reason"]} for i, r in enumerate(match_result)]),
+                         use_container_width=True, hide_index=True)
+            top = match_result[0]
+            st.success(f"当前规则下优先考虑：{top['display_name']}（{top['score']} 分）。请结合简历正文人工复核。")
