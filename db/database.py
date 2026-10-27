@@ -51,6 +51,17 @@ def init_db() -> None:
                 FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS resume_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT NOT NULL,
+                target_role TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                stored_filename TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            )
+        """)
 
 
 def create_job(*, title: str, company: str, city: str = "", salary: str = "", url: str = "", jd: str = "", status: str = "待投递") -> int:
@@ -172,3 +183,32 @@ def count_jobs() -> int:
     with get_connection() as conn:
         row = conn.execute("SELECT COUNT(*) AS total FROM jobs").fetchone()
         return int(row["total"])
+
+
+
+def create_resume_version(*, display_name: str, target_role: str, notes: str, stored_filename: str, sha256: str) -> int:
+    """保存简历版本元数据；文件内容保存在本地 resumes 目录。"""
+    init_db()
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "INSERT INTO resume_versions (display_name, target_role, notes, stored_filename, sha256) VALUES (?, ?, ?, ?, ?)",
+            (display_name.strip(), target_role.strip(), notes.strip(), stored_filename, sha256),
+        )
+        return int(cursor.lastrowid)
+
+
+def list_resume_versions() -> list[dict[str, Any]]:
+    init_db()
+    with get_connection() as conn:
+        return [dict(row) for row in conn.execute("SELECT * FROM resume_versions ORDER BY id DESC").fetchall()]
+
+
+def delete_resume_version(resume_id: int) -> dict[str, Any] | None:
+    """删除版本元数据并返回记录；调用方负责删除本地文件。"""
+    init_db()
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM resume_versions WHERE id=?", (resume_id,)).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM resume_versions WHERE id=?", (resume_id,))
+        return dict(row)
