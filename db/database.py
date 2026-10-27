@@ -62,6 +62,17 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS application_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                result TEXT NOT NULL,
+                evidence TEXT NOT NULL DEFAULT '',
+                page_url TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            )
+        """)
 
 
 def create_job(*, title: str, company: str, city: str = "", salary: str = "", url: str = "", jd: str = "", status: str = "待投递") -> int:
