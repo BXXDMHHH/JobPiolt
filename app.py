@@ -243,7 +243,7 @@ with tab_boss:
             boss_company = st.text_input("公司名称（请手动核对）")
             boss_city = st.text_input("工作城市")
             boss_salary = st.text_input("薪资范围")
-            boss_jd = st.text_area("岗位描述（从页面文本复制后可在此编辑）", value=page_data.get("description", ""), height=120)
+            boss_jd = st.text_area("岗位描述（从页面文本复制后可在此编辑）", value=page_data.get("text", "")[:12000], height=180)
             if st.form_submit_button("保存到岗位库", type="primary"):
                 if not boss_title.strip() or not boss_company.strip():
                     st.error("岗位名称和公司名称必填。请先核对页面内容。")
