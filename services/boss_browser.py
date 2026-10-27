@@ -27,7 +27,7 @@ def launch_browser(url: str = DEFAULT_URL) -> str:
 
 
 def read_current_page() -> dict[str, str]:
-    """通过本机 CDP 读取当前标签页的标题、URL、描述和可见文本。"""
+    """通过本机 CDP 读取当前标签页；遇到导航切换时重新定位并有限重试。"""
     from playwright.sync_api import sync_playwright, Error as PlaywrightError
     with sync_playwright() as p:
         try:
@@ -35,18 +35,55 @@ def read_current_page() -> dict[str, str]:
         except PlaywrightError as exc:
             raise RuntimeError("未发现 JobPilot 专用浏览器。请先点击“启动 BOSS 浏览器”。") from exc
         try:
-            pages = [page for context in browser.contexts for page in context.pages]
-            page = next((page for page in reversed(pages) if "zhipin.com" in page.url), None)
-            if page is None:
-                raise RuntimeError("当前没有打开 BOSS 直聘页面，请在专用浏览器中打开岗位详情页。")
-            data = page.evaluate("""() => ({
-                title: document.title || '',
-                url: location.href || '',
-                description: document.querySelector('meta[name="description"]')?.content || '',
-                text: (document.body?.innerText || '').slice(0, 12000)
-            })""")
-            return {k: str(v or "") for k, v in data.items()}
+            last_error = None
+            for attempt in range(3):
+                try:
+                    pages = [page for context in browser.contexts for page in context.pages]
+                    page = next(
+                        (candidate for candidate in reversed(pages)
+                         if not candidate.is_closed() and "zhipin.com" in candidate.url),
+                        None,
+                    )
+                    if page is None:
+                        raise RuntimeError(
+                            "当前没有打开 BOSS 直聘页面，请在专用浏览器中打开岗位详情页后重试。"
+                        )
+
+                    # 如果页面正在导航，先等待 DOM 可用；SPA 页面不强制等待 networkidle。
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=2500)
+                    except PlaywrightError:
+                        pass
+
+                    data = page.evaluate("""() => ({
+                        title: document.title || '',
+                        url: location.href || '',
+                        description: document.querySelector('meta[name="description"]')?.content || '',
+                        text: (document.body?.innerText || '').slice(0, 12000)
+                    })""")
+                    # 过滤掉跳转中留下的空白结果，避免把中间页保存成岗位。
+                    if not (data.get("title") or data.get("text") or data.get("url")):
+                        raise RuntimeError("页面内容暂时为空，可能仍在加载。")
+                    return {k: str(v or "") for k, v in data.items()}
+
+                except PlaywrightError as exc:
+                    last_error = exc
+                    message = str(exc).lower()
+                    if "execution context was destroyed" not in message and "navigat" not in message:
+                        raise
+                    time.sleep(0.7 * (attempt + 1))
+                except RuntimeError as exc:
+                    last_error = exc
+                    if "页面" not in str(exc) and "加载" not in str(exc):
+                        raise
+                    time.sleep(0.5 * (attempt + 1))
+
+            raise RuntimeError(
+                "BOSS 页面在读取期间持续跳转，暂时无法稳定读取。"
+                "请等岗位详情页完全显示后，再点击“读取当前 BOSS 页面”。"
+            ) from last_error
         finally:
+            # CDP 连接在此结束；不主动关闭用户正在使用的浏览器页面。
             browser.close()
 
 
