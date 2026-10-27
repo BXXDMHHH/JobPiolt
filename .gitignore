@@ -8,6 +8,9 @@ venv/
 # Local database and user data
 data/*.db
 data/*.sqlite*
+data/boss_browser_profile/
+data/chromium/
+
 resumes/*
 !resumes/.gitkeep
 logs/*
